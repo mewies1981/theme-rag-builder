@@ -1,0 +1,54 @@
+# =========================
+# 🔐 Environment & Secrets
+# =========================
+.env
+
+# =========================
+# 🐍 Python
+# =========================
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environment
+venv/
+.env/
+.venv/
+
+# =========================
+# 🧠 ChromaDB (Vector DB)
+# =========================
+chroma_db/
+
+# =========================
+# 📂 Local Data / Scraped Files
+# =========================
+htmls/
+
+# =========================
+# 🧪 Test / Temp Files
+# =========================
+test_scraper.py
+*.log
+
+# =========================
+# 🧰 OS / Editor Files
+# =========================
+.DS_Store
+Thumbs.db
+
+# VS Code
+.vscode/
+
+# =========================
+# 📦 Build / Packaging
+# =========================
+build/
+dist/
+*.egg-info/
+
+# =========================
+# 🚫 Optional (if you want to exclude configs)
+# =========================
+# Uncomment if config.py contains secrets
+# config.py
