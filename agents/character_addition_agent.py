@@ -1,102 +1,60 @@
 """
 Character Addition Agent
 ------------------------
-Discovers One Piece characters from the fandom wiki, finds their images
-via the Jikan API (MAL), checks which ones are already in MongoDB,
-and inserts only the new ones.
+Discovers characters from MyAnimeList, scrapes a picture from each character's
+/pics page, filters out names already in MongoDB, and inserts only new ones.
 
-Usage:
+Usage (from theme-rag-builder/):
     PYTHONPATH=. venv/bin/python3 agents/character_addition_agent.py
-    PYTHONPATH=. venv/bin/python3 agents/character_addition_agent.py --limit 10
+    PYTHONPATH=. venv/bin/python3 agents/character_addition_agent.py --limit 20
     PYTHONPATH=. venv/bin/python3 agents/character_addition_agent.py --dry-run
+    PYTHONPATH=. venv/bin/python3 agents/character_addition_agent.py --item Naruto
+    PYTHONPATH=. venv/bin/python3 agents/character_addition_agent.py --all
 """
 
 import argparse
-import time
-import re
-import requests
-from pymongo import MongoClient
-from dotenv import load_dotenv
-import os
+import sys
 from pathlib import Path
 
-load_dotenv(Path(__file__).resolve().parents[1] / ".env")
+from dotenv import load_dotenv
+from pymongo import MongoClient
 
-# ── Config ────────────────────────────────────────────────────────────────────
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
 
-MONGO_URI      = os.getenv("MONGODB_URI", "mongodb://localhost:27017/themey")
-JIKAN_BASE     = "https://api.jikan.moe/v4"
-ONE_PIECE_MAL  = 21          # MAL anime ID for One Piece
-JIKAN_DELAY    = 0.5         # seconds between Jikan requests (rate limit: 3/s)
-CATEGORY_KEY   = "anime"
-ITEM_NAME      = "One Piece"
+from agents.anime_presets import AnimePreset, resolve_preset
+from scraper.mal_character_discovery import discover_characters
+from scraper.mal_character_images import fetch_images
 
-# Fandom wiki categories to discover characters from
-CHARACTER_CATEGORIES = [
-    "Straw Hat Pirates",
-    "Four Emperors",
-    "Seven Warlords of the Sea",
-    "Marines",
-    "Whitebeard Pirates",
-    "Red Hair Pirates",
-    "Worst Generation",
-    "Revolutionaries",
-    "Cipher Pol",
-]
+for env_path in (_PROJECT_ROOT.parent / ".env", _PROJECT_ROOT / ".env"):
+    if env_path.exists():
+        load_dotenv(env_path)
+        break
+else:
+    load_dotenv()
 
-FANDOM_API = "https://onepiece.fandom.com/api.php"
-HEADERS    = {"User-Agent": "Mozilla/5.0 (compatible; anime-rag-builder/1.0)"}
+import os
+
+MONGO_URI    = os.getenv("MONGODB_URI", "mongodb://localhost:27017/themey")
+CATEGORY_KEY = "anime"
 
 
-# ── Discovery ─────────────────────────────────────────────────────────────────
-
-def discover_character_names() -> list[str]:
-    """Fetch all character page titles from fandom wiki categories."""
-    seen   = set()
-    result = []
-
-    for cat in CHARACTER_CATEGORIES:
-        params = {
-            "action":      "query",
-            "list":        "categorymembers",
-            "cmtitle":     f"Category:{cat}",
-            "cmlimit":     500,
-            "cmnamespace": 0,
-            "cmtype":      "page",
-            "format":      "json",
-        }
-        try:
-            resp = requests.get(FANDOM_API, params=params, headers=HEADERS, timeout=10)
-            members = resp.json().get("query", {}).get("categorymembers", [])
-            new = [m["title"] for m in members if m["title"] not in seen]
-            for t in new:
-                seen.add(t)
-                result.append(t)
-            print(f"  📂 {cat}: {len(members)} found, {len(new)} new")
-        except Exception as e:
-            print(f"  ⚠️  Could not fetch category '{cat}': {e}")
-        time.sleep(0.3)
-
-    return result
-
-
-# ── MongoDB ────────────────────────────────────────────────────────────────────
-
-def get_existing_names() -> set[str]:
-    """Return the set of character names already in MongoDB for One Piece."""
+def get_existing_names(item_name: str) -> set[str]:
     client = MongoClient(MONGO_URI)
     db = client.get_default_database()
-    docs = db.characters.find(
-        {"categoryKey": CATEGORY_KEY, "itemName": ITEM_NAME},
-        {"name": 1}
-    )
-    names = {d["name"] for d in docs}
+    names = {
+        d["name"]
+        for d in db.characters.find(
+            {"categoryKey": CATEGORY_KEY, "itemName": item_name},
+            {"name": 1},
+        )
+    }
     client.close()
     return names
 
 
 def insert_characters(characters: list[dict], dry_run: bool = False) -> int:
-    """Insert a list of character dicts into MongoDB. Returns count inserted."""
     if not characters:
         return 0
     if dry_run:
@@ -105,108 +63,70 @@ def insert_characters(characters: list[dict], dry_run: bool = False) -> int:
 
     client = MongoClient(MONGO_URI)
     db = client.get_default_database()
-    result = db.characters.insert_many(characters)
+    n = len(db.characters.insert_many(characters).inserted_ids)
     client.close()
-    return len(result.inserted_ids)
+    return n
 
 
-# ── Jikan image lookup ─────────────────────────────────────────────────────────
+def run(
+    preset: AnimePreset,
+    limit: int | None = 10,
+    dry_run: bool = False,
+):
+    print(f"\n🤖 Character Addition Agent — {preset.item_name}")
+    print(f"{'[DRY RUN] ' if dry_run else ''}MongoDB: {MONGO_URI}")
+    print(f"   MAL anime id: {preset.mal_id}\n")
 
-def _normalize(name: str) -> str:
-    """Lowercase, remove punctuation for loose comparison."""
-    return re.sub(r"[^a-z0-9 ]", "", name.lower()).strip()
+    print("📡 Discovering cast from MyAnimeList (this anime only)...")
+    all_chars = discover_characters(preset.mal_id)
+    print(f"\n✅ {len(all_chars)} cast members found for {preset.item_name}\n")
 
-
-def fetch_image(character_name: str) -> str | None:
-    """
-    Search Jikan for the character, scoped to One Piece (MAL ID 21).
-    Returns the MAL image URL or None if not found.
-    """
-    url = f"{JIKAN_BASE}/characters"
-    params = {"q": character_name, "limit": 5}
-
-    try:
-        resp = requests.get(url, params=params, headers=HEADERS, timeout=10)
-        resp.raise_for_status()
-        data = resp.json().get("data", [])
-    except Exception as e:
-        print(f"    ⚠️  Jikan error for '{character_name}': {e}")
-        return None
-
-    if not data:
-        return None
-
-    norm_query = _normalize(character_name)
-
-    # Prefer exact name match
-    for item in data:
-        if _normalize(item.get("name", "")) == norm_query:
-            return item.get("images", {}).get("jpg", {}).get("image_url")
-
-    # Fall back to first result if name is a substring match
-    first = data[0]
-    first_name = _normalize(first.get("name", ""))
-    if norm_query in first_name or first_name in norm_query:
-        return first.get("images", {}).get("jpg", {}).get("image_url")
-
-    return None
-
-
-# ── Main ──────────────────────────────────────────────────────────────────────
-
-def run(limit: int = None, dry_run: bool = False):
-    print(f"\n🤖 Character Addition Agent — {ITEM_NAME}")
-    print(f"{'[DRY RUN] ' if dry_run else ''}MongoDB: {MONGO_URI}\n")
-
-    # Step 1: discover candidates from fandom wiki
-    print("📡 Discovering characters from fandom wiki categories...")
-    all_names = discover_character_names()
-    print(f"\n✅ {len(all_names)} characters discovered across {len(CHARACTER_CATEGORIES)} categories\n")
-
-    # Step 2: filter out already-existing ones
     print("🔍 Checking existing characters in MongoDB...")
-    existing = get_existing_names()
-    pending = [n for n in all_names if n not in existing]
+    existing = get_existing_names(preset.item_name)
+    pending = [c for c in all_chars if c.name not in existing]
+    pending.sort(key=lambda c: c.favorites, reverse=True)
     print(f"   Already in DB : {len(existing)}")
-    print(f"   New to add    : {len(pending)}\n")
+    print(f"   New to add    : {len(pending)} (sorted by MAL favorites, highest first)\n")
 
     if not pending:
         print("✅ Nothing to add — all discovered characters already exist in MongoDB.")
         return
 
-    # Apply limit
-    if limit and len(pending) > limit:
-        print(f"🔢 --limit {limit}: processing first {limit} of {len(pending)} new characters.\n")
+    if limit is not None and len(pending) > limit:
+        top = pending[0]
+        print(
+            f"🔢 --limit {limit}: processing top {limit} by favorites "
+            f"(e.g. {top.name} — {top.favorites:,}).\n"
+        )
         pending = pending[:limit]
 
-    # Step 3: fetch images and build documents
-    print("🌐 Fetching images from Jikan (MAL)...\n")
-    to_insert = []
-    skipped   = []
+    print("🖼️  Scraping pictures from MAL /pics pages (cast verified)...\n")
+    images = fetch_images(pending, preset.mal_id)
 
-    for i, name in enumerate(pending):
-        print(f"  ({i+1}/{len(pending)}) {name}", end=" ... ")
-        image = fetch_image(name)
-        time.sleep(JIKAN_DELAY)
+    to_insert: list[dict] = []
+    skipped: list[str] = []
 
-        if image:
-            print(f"✅ {image}")
+    for i, char in enumerate(pending):
+        result = images.get(char.name)
+        print(f"  ({i + 1}/{len(pending)}) {char.name} ({char.favorites:,} fav)", end=" ... ")
+        if result:
+            print(f"✅ {result.url}")
+            print(f"       {result.pics_page_url}")
             to_insert.append({
-                "name":        name,
-                "image":       image,
+                "name":        char.name,
+                "image":       result.url,
                 "categoryKey": CATEGORY_KEY,
-                "itemName":    ITEM_NAME,
+                "itemName":    preset.item_name,
             })
         else:
             print("⚠️  no image found — skipped")
-            skipped.append(name)
+            skipped.append(char.name)
 
-    # Step 4: insert into MongoDB
     print(f"\n💾 Inserting {len(to_insert)} characters into MongoDB...")
     inserted = insert_characters(to_insert, dry_run=dry_run)
 
-    print(f"\n{'='*60}")
-    print(f"✅ Done")
+    print(f"\n{'=' * 60}")
+    print("✅ Done")
     print(f"   Inserted : {inserted}")
     print(f"   Skipped  : {len(skipped)} (no image found)")
     if skipped:
@@ -214,8 +134,39 @@ def run(limit: int = None, dry_run: bool = False):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--limit",   type=int, default=10, help="Max new characters to add per run (default: 10)")
-    parser.add_argument("--dry-run", action="store_true",  help="Discover and fetch images but do not write to MongoDB")
+    parser = argparse.ArgumentParser(
+        description="Discover MAL characters, scrape /pics images, insert new rows into MongoDB.",
+    )
+    parser.add_argument(
+        "--item",
+        default="One Piece",
+        help="Anime item name or preset key (default: One Piece). Presets: one piece, naruto",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=10,
+        help="Max new characters per run (default: 10). Ignored when --all is set.",
+    )
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help="Process every new character (no limit)",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Discover and fetch images but do not write to MongoDB",
+    )
     args = parser.parse_args()
-    run(limit=args.limit, dry_run=args.dry_run)
+
+    try:
+        preset = resolve_preset(args.item)
+    except ValueError as e:
+        parser.error(str(e))
+
+    run(
+        preset=preset,
+        limit=None if args.all else args.limit,
+        dry_run=args.dry_run,
+    )
