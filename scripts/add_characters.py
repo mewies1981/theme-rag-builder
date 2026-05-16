@@ -1,15 +1,16 @@
 """
-Character Addition Agent
-------------------------
-Discovers characters from MyAnimeList, scrapes a picture from each character's
-/pics page, filters out names already in MongoDB, and inserts only new ones.
+Add Characters script
+---------------------
+Discovers characters for a given anime from MyAnimeList, fetches their
+images from the MAL /pics pages, checks which ones are already in MongoDB,
+and inserts only the new ones.
 
 Usage (from theme-rag-builder/):
-    PYTHONPATH=. venv/bin/python3 agents/character_addition_agent.py
-    PYTHONPATH=. venv/bin/python3 agents/character_addition_agent.py --limit 20
-    PYTHONPATH=. venv/bin/python3 agents/character_addition_agent.py --dry-run
-    PYTHONPATH=. venv/bin/python3 agents/character_addition_agent.py --item Naruto
-    PYTHONPATH=. venv/bin/python3 agents/character_addition_agent.py --all
+    PYTHONPATH=. venv/bin/python3 scripts/add_characters.py --item "Naruto"
+    PYTHONPATH=. venv/bin/python3 scripts/add_characters.py --item "One Piece" --limit 20
+    PYTHONPATH=. venv/bin/python3 scripts/add_characters.py --item "Attack on Titan" --dry-run
+    PYTHONPATH=. venv/bin/python3 scripts/add_characters.py --all
+    PYTHONPATH=. venv/bin/python3 scripts/add_characters.py --list
 """
 
 import argparse
@@ -62,28 +63,24 @@ def insert_characters(characters: list[dict], dry_run: bool = False) -> int:
         return 0
 
     client = MongoClient(MONGO_URI)
-    db = client.get_default_database()
-    n = len(db.characters.insert_many(characters).inserted_ids)
+    db     = client.get_default_database()
+    n      = len(db.characters.insert_many(characters).inserted_ids)
     client.close()
     return n
 
 
-def run(
-    preset: AnimePreset,
-    limit: int | None = 10,
-    dry_run: bool = False,
-):
-    print(f"\n🤖 Character Addition Agent — {preset.item_name}")
+def run(preset: AnimePreset, limit: int | None = 10, dry_run: bool = False):
+    print(f"\n🎬 Add Characters — {preset.item_name}")
     print(f"{'[DRY RUN] ' if dry_run else ''}MongoDB: {MONGO_URI}")
     print(f"   MAL anime id: {preset.mal_id}\n")
 
-    print("📡 Discovering cast from MyAnimeList (this anime only)...")
+    print("📡 Discovering cast from MyAnimeList...")
     all_chars = discover_characters(preset.mal_id)
     print(f"\n✅ {len(all_chars)} cast members found for {preset.item_name}\n")
 
     print("🔍 Checking existing characters in MongoDB...")
     existing = get_existing_names(preset.item_name)
-    pending = [c for c in all_chars if c.name not in existing]
+    pending  = [c for c in all_chars if c.name not in existing]
     pending.sort(key=lambda c: c.favorites, reverse=True)
     print(f"   Already in DB : {len(existing)}")
     print(f"   New to add    : {len(pending)} (sorted by MAL favorites, highest first)\n")
@@ -100,18 +97,17 @@ def run(
         )
         pending = pending[:limit]
 
-    print("🖼️  Scraping pictures from MAL /pics pages (cast verified)...\n")
+    print("🖼️  Scraping pictures from MAL /pics pages...\n")
     images = fetch_images(pending, preset.mal_id)
 
     to_insert: list[dict] = []
-    skipped: list[str] = []
+    skipped:   list[str]  = []
 
     for i, char in enumerate(pending):
         result = images.get(char.name)
         print(f"  ({i + 1}/{len(pending)}) {char.name} ({char.favorites:,} fav)", end=" ... ")
         if result:
             print(f"✅ {result.url}")
-            print(f"       {result.pics_page_url}")
             to_insert.append({
                 "name":        char.name,
                 "image":       result.url,
@@ -135,12 +131,12 @@ def run(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Discover MAL characters, scrape /pics images, insert new rows into MongoDB.",
+        description="Add characters from MyAnimeList to MongoDB."
     )
     parser.add_argument(
         "--item",
         default="One Piece",
-        help="Anime item name or preset key (default: One Piece). Presets: one piece, naruto",
+        help="Anime item name or preset key (default: One Piece).",
     )
     parser.add_argument(
         "--limit",
@@ -151,14 +147,26 @@ if __name__ == "__main__":
     parser.add_argument(
         "--all",
         action="store_true",
-        help="Process every new character (no limit)",
+        help="Process every new character (no limit).",
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Discover and fetch images but do not write to MongoDB",
+        help="Discover and fetch images but do not write to MongoDB.",
+    )
+    parser.add_argument(
+        "--list",
+        action="store_true",
+        help="Print all supported anime names and exit.",
     )
     args = parser.parse_args()
+
+    if args.list:
+        from agents.anime_presets import PRESETS
+        print("Supported anime:")
+        for name in sorted(p.item_name for p in PRESETS.values()):
+            print(f"  • {name}")
+        sys.exit(0)
 
     try:
         preset = resolve_preset(args.item)
