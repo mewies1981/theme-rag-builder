@@ -34,8 +34,13 @@ list_anime          — Fetch the live list of anime from MongoDB. Call this
                       first whenever you need to know which anime are available,
                       or when the user asks about "all anime" or "every anime".
 
+add_anime           — Add a brand-new anime to the database. Looks up the cover
+                      image from AniList and the MAL ID from Jikan automatically.
+                      Returns the resolved mal_id so you can call add_characters
+                      immediately after without a separate lookup.
+
 check_anime_status  — Read all three layers for one anime in a single call.
-                      Always call this before any write operation.
+                      Always call this before any write operation on existing anime.
 
 add_characters      — Discover characters from MAL, fetch their images, and
                       insert new ones into MongoDB. Uses limit= to cap the
@@ -54,17 +59,21 @@ ingest_wiki_page    — Fetch a fandom/wiki URL, extract structured knowledge,
 Decision guidelines
 ───────────────────
 • Use list_anime to discover which anime exist — never assume a fixed list.
-• Always call check_anime_status before any write operation.
-• For a "set up X completely" request:
+• For a new anime the user asks to add:
+    1. add_anime (adds the item + resolves image and mal_id)
+    2. add_characters with the mal_id returned by add_anime (limit=20)
+    3. fetch_topic_images
+    4. ingest_wiki_page for the anime's main wiki page
+• For an existing anime: always call check_anime_status first.
+• For a "set up X completely" request on an existing anime:
     1. check_anime_status
     2. add_characters (limit=20 for a thorough first pass)
     3. fetch_topic_images (if image count is low)
     4. ingest_wiki_page for the anime's main wiki page
-    5. Optionally ingest key character pages for deeper RAG coverage
 • For "add more characters": check_anime_status, then add_characters.
 • For "top up images": check_anime_status, then fetch_topic_images.
 • The anime name passed to tools must match the itemName in MongoDB exactly
-  (use the value returned by list_anime).
+  (use the value returned by list_anime or by add_anime).
 • Use dry_run=True when the user asks to preview without committing.
 • Report numbers concisely: what existed, what was added, what was skipped.
 • If a tool returns success=False, report the error and stop — do not retry.
@@ -90,6 +99,34 @@ TOOLS: list[dict] = [
             "type": "object",
             "properties": {},
             "required": [],
+        },
+    ),
+    _fn(
+        "add_anime",
+        (
+            "Add a brand-new anime to the MongoDB categories collection. "
+            "Automatically fetches a cover image from AniList and the MAL ID "
+            "from Jikan — pass image or mal_id explicitly to override. "
+            "Returns the resolved mal_id so add_characters can be called "
+            "immediately without a separate lookup."
+        ),
+        {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Anime title to add, e.g. 'Fullmetal Alchemist: Brotherhood'.",
+                },
+                "image": {
+                    "type": "string",
+                    "description": "Cover image URL. Auto-fetched from AniList if omitted.",
+                },
+                "mal_id": {
+                    "type": "integer",
+                    "description": "MyAnimeList anime ID. Auto-fetched from Jikan if omitted.",
+                },
+            },
+            "required": ["name"],
         },
     ),
     _fn(

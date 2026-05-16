@@ -29,6 +29,119 @@ def _mongo_db():
     return client, client.get_default_database()
 
 
+# ── Add a new anime ───────────────────────────────────────────────────────────
+
+def _lookup_anime_info(name: str) -> dict:
+    """
+    Try AniList then Jikan to resolve a cover image and MAL ID for an anime.
+    Returns { image, mal_id } — either field may be None if not found.
+    """
+    import requests
+    HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; theme-rag-builder/1.0)"}
+    image   = None
+    mal_id  = None
+
+    # AniList — best quality cover images
+    try:
+        query = """
+        query ($search: String) {
+          Media(search: $search, type: ANIME) {
+            coverImage { extraLarge large }
+          }
+        }
+        """
+        resp = requests.post(
+            "https://graphql.anilist.co",
+            json={"query": query, "variables": {"search": name}},
+            headers={**HEADERS, "Content-Type": "application/json"},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        media = resp.json().get("data", {}).get("Media")
+        if media:
+            cover = media.get("coverImage", {})
+            image = cover.get("extraLarge") or cover.get("large")
+    except Exception:
+        pass
+
+    # Jikan — MAL ID + fallback image
+    try:
+        resp = requests.get(
+            "https://api.jikan.moe/v4/anime",
+            params={"q": name, "limit": 3},
+            headers=HEADERS,
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json().get("data", [])
+        if data:
+            mal_id = data[0]["mal_id"]
+            if not image:
+                image = data[0].get("images", {}).get("jpg", {}).get("image_url")
+    except Exception:
+        pass
+
+    return {"image": image, "mal_id": mal_id}
+
+
+def add_anime(name: str, image: str | None = None, mal_id: int | None = None) -> dict:
+    """
+    Add a new anime to the MongoDB categories collection and return the
+    resolved image URL and MAL ID so the orchestrator can immediately call
+    add_characters or fetch_topic_images without a separate lookup.
+
+    If image is omitted, it is fetched from AniList then Jikan.
+    If mal_id is omitted, it is fetched from Jikan.
+    """
+    client, db = _mongo_db()
+
+    # Duplicate check (case-insensitive)
+    doc = db.categories.find_one({"categoryKey": CATEGORY_KEY}, {"items.name": 1})
+    if doc:
+        existing_names = [item["name"] for item in doc.get("items", [])]
+        if any(n.lower() == name.lower() for n in existing_names):
+            client.close()
+            return {
+                "success": False,
+                "error":   f"'{name}' already exists in the database.",
+                "existing_names": existing_names,
+            }
+
+    # Resolve image and/or MAL ID if not provided
+    if not image or not mal_id:
+        info = _lookup_anime_info(name)
+        image  = image  or info["image"]
+        mal_id = mal_id or info["mal_id"]
+
+    if not image:
+        client.close()
+        return {
+            "success": False,
+            "error":   (
+                f"Could not find a cover image for '{name}'. "
+                "Pass image=<URL> explicitly."
+            ),
+        }
+
+    # Insert into categories
+    db.categories.update_one(
+        {"categoryKey": CATEGORY_KEY},
+        {"$push": {"items": {"name": name, "image": image}}},
+    )
+    client.close()
+
+    result = {
+        "success": True,
+        "anime":   name,
+        "image":   image,
+        "message": f"'{name}' added to the anime category.",
+    }
+    if mal_id:
+        result["mal_id"] = mal_id
+        result["note"]   = "Use mal_id with add_characters to populate characters."
+    return result
+
+
 # ── Live anime list ───────────────────────────────────────────────────────────
 
 def list_anime() -> dict:

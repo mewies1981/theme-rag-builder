@@ -4,6 +4,7 @@ Dispatches tool_use blocks from Claude to the corresponding tool functions.
 
 from tools.anime_db_tools import (
     list_anime,
+    add_anime,
     check_anime_status,
     add_characters,
     fetch_topic_images,
@@ -12,6 +13,7 @@ from tools.anime_db_tools import (
 
 _REGISTRY = {
     "list_anime":         list_anime,
+    "add_anime":          add_anime,
     "check_anime_status": check_anime_status,
     "add_characters":     add_characters,
     "fetch_topic_images": fetch_topic_images,
