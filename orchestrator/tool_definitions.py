@@ -56,6 +56,10 @@ ingest_wiki_page    — Fetch a fandom/wiki URL, extract structured knowledge,
                       https://<anime>.fandom.com/wiki/<Anime_Title>
                       https://<anime>.fandom.com/wiki/<Character_Name>
 
+add_soundtrack      — Search YouTube for the anime's opening/OST and save the
+                      video ID to MongoDB. Accepts an optional custom search
+                      query or a direct video_id to skip the search entirely.
+
 Decision guidelines
 ───────────────────
 • Use list_anime to discover which anime exist — never assume a fixed list.
@@ -78,6 +82,12 @@ Decision guidelines
 • Report numbers concisely: what existed, what was added, what was skipped.
 • If a tool returns success=False, report the error and stop — do not retry.
 • Ingest a maximum of 3–4 wiki pages per orchestrator run to avoid long waits.
+• For "add/find a soundtrack for X": call add_soundtrack with the anime name.
+  The tool searches YouTube, picks the top result, saves it, and returns
+  alternatives. Report the saved title + URL, and list alternatives so the
+  user can ask you to switch to a different one.
+• If the user wants a specific video (e.g. "use this YouTube link"), extract
+  the video ID and call add_soundtrack(anime, video_id=<id>).
 """
 
 # ── Tool schemas ──────────────────────────────────────────────────────────────
@@ -236,6 +246,35 @@ TOOLS: list[dict] = [
                 },
             },
             "required": ["url", "anime"],
+        },
+    ),
+    _fn(
+        "add_soundtrack",
+        (
+            "Search YouTube for a soundtrack video for the given anime and save "
+            "the video ID to the MongoDB soundtracks collection. "
+            "By default searches for '{anime} opening theme official' and picks "
+            "the top result. Pass query to customise the search (e.g. 'Naruto OST best'), "
+            "or pass video_id to skip the search and save a specific video directly. "
+            "Returns the saved video details plus up to 4 alternatives."
+        ),
+        {
+            "type": "object",
+            "properties": {
+                "anime": {
+                    "type": "string",
+                    "description": "Anime item name exactly as stored in MongoDB.",
+                },
+                "query": {
+                    "type": "string",
+                    "description": "Custom YouTube search query. Defaults to '{anime} opening theme official'.",
+                },
+                "video_id": {
+                    "type": "string",
+                    "description": "YouTube video ID to save directly, skipping the search.",
+                },
+            },
+            "required": ["anime"],
         },
     ),
 ]

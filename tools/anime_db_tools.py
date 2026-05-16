@@ -447,3 +447,130 @@ def ingest_wiki_page(url: str, anime: str, source_label: str = "") -> dict:
         "source":  label,
         "stats":   stats,
     }
+
+
+# ── Soundtrack ────────────────────────────────────────────────────────────────
+
+def _search_youtube(query: str, max_results: int = 5) -> list[dict]:
+    """
+    Search YouTube without an API key by parsing the embedded JSON on the
+    results page. Returns a list of { videoId, title, channel, url } dicts.
+    """
+    import json
+    import requests
+
+    resp = requests.get(
+        "https://www.youtube.com/results",
+        params={"search_query": query},
+        headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
+        timeout=15,
+    )
+    resp.raise_for_status()
+
+    idx = resp.text.find("ytInitialData = ")
+    if idx == -1:
+        return []
+
+    decoder = json.JSONDecoder()
+    try:
+        data, _ = decoder.raw_decode(resp.text, idx + len("ytInitialData = "))
+    except json.JSONDecodeError:
+        return []
+
+    try:
+        section = (
+            data["contents"]["twoColumnSearchResultsRenderer"]
+                ["primaryContents"]["sectionListRenderer"]
+                ["contents"][0]["itemSectionRenderer"]["contents"]
+        )
+    except (KeyError, IndexError):
+        return []
+
+    results = []
+    for item in section:
+        vr = item.get("videoRenderer")
+        if not vr:
+            continue
+        video_id = vr.get("videoId", "")
+        title    = (vr.get("title", {}).get("runs") or [{}])[0].get("text", "Unknown")
+        channel  = (vr.get("ownerText", {}).get("runs") or [{}])[0].get("text", "")
+        results.append({
+            "videoId": video_id,
+            "title":   title,
+            "channel": channel,
+            "url":     f"https://www.youtube.com/watch?v={video_id}",
+        })
+        if len(results) >= max_results:
+            break
+
+    return results
+
+
+def add_soundtrack(
+    anime: str,
+    query: str | None = None,
+    video_id: str | None = None,
+) -> dict:
+    """
+    Find a YouTube video for the anime's soundtrack and save it to MongoDB.
+
+    If video_id is supplied, skip the search and save it directly.
+    Otherwise, search YouTube using query (defaults to "{anime} opening theme official"),
+    pick the top result, save it, and return the top 5 results so the orchestrator
+    can report alternatives to the user.
+    """
+    item_name = anime
+
+    # ── Direct save (video_id provided) ─────────────────────────────────────
+    if video_id:
+        client, db = _mongo_db()
+        db.soundtracks.update_one(
+            {"categoryKey": CATEGORY_KEY, "itemName": item_name},
+            {"$set": {"categoryKey": CATEGORY_KEY, "itemName": item_name, "youtubeVideoId": video_id}},
+            upsert=True,
+        )
+        client.close()
+        return {
+            "success":        True,
+            "anime":          item_name,
+            "saved_video_id": video_id,
+            "url":            f"https://www.youtube.com/watch?v={video_id}",
+            "message":        f"Soundtrack saved for '{item_name}'.",
+        }
+
+    # ── YouTube search ───────────────────────────────────────────────────────
+    search_query = query or f"{anime} opening theme official"
+    print(f"  Searching YouTube: {search_query!r}…")
+
+    try:
+        results = _search_youtube(search_query)
+    except Exception as e:
+        return {"success": False, "error": f"YouTube search failed: {e}"}
+
+    if not results:
+        return {
+            "success": False,
+            "error":   f"No YouTube results found for '{search_query}'.",
+        }
+
+    top = results[0]
+
+    client, db = _mongo_db()
+    db.soundtracks.update_one(
+        {"categoryKey": CATEGORY_KEY, "itemName": item_name},
+        {"$set": {"categoryKey": CATEGORY_KEY, "itemName": item_name, "youtubeVideoId": top["videoId"]}},
+        upsert=True,
+    )
+    client.close()
+
+    return {
+        "success":        True,
+        "anime":          item_name,
+        "search_query":   search_query,
+        "saved_video_id": top["videoId"],
+        "saved_title":    top["title"],
+        "saved_channel":  top["channel"],
+        "url":            top["url"],
+        "alternatives":   results[1:],
+        "message":        f"Saved '{top['title']}' by {top['channel']} as the soundtrack for '{item_name}'.",
+    }

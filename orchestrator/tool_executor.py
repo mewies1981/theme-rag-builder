@@ -9,6 +9,7 @@ from tools.anime_db_tools import (
     add_characters,
     fetch_topic_images,
     ingest_wiki_page,
+    add_soundtrack,
 )
 
 _REGISTRY = {
@@ -18,6 +19,7 @@ _REGISTRY = {
     "add_characters":     add_characters,
     "fetch_topic_images": fetch_topic_images,
     "ingest_wiki_page":   ingest_wiki_page,
+    "add_soundtrack":     add_soundtrack,
 }
 
 
